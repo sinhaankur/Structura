@@ -14,9 +14,11 @@ Scaffold status and the ordered build after it. ✅ done · 🟡 partial · ⬜ 
 - ✅ Docs (README, ARCHITECTURE, PRIVACY), Info.plist + AndroidManifest privacy
 
 ## Next
-1. ⬜ **GL viewport** (`lib/ui/mesh_view.dart`) — orbit/pan/zoom, solid/wireframe/
-   point-cloud/confidence-heatmap shading. Feeds `RepaintBoundary → toImage` for
-   the Photos render.
+1. ✅ **3D viewport** (`lib/ui/mesh_view.dart`) — interactive software renderer
+   (no GL plugin): orbit/pan/pinch, painter's-algorithm depth sort, headlight
+   lambert, solid/wireframe/points/confidence modes, FOV-fit framing, auto
+   points-fallback above 60k tris. `renderScanToPng()` gives the Photos render
+   (`ui.PictureRecorder → toImage`). Camera math in `camera_math.dart`, tested.
 2. ⬜ **iOS capture wiring** — AR camera platform view; register plugin in
    `AppDelegate`; sample camera colors onto mesh verts (COLOR_0).
 3. ⬜ **Android capture wiring** — GLSurface render loop: acquire depth image →
@@ -29,7 +31,8 @@ Scaffold status and the ordered build after it. ✅ done · 🟡 partial · ⬜ 
 9. ⬜ **Install/landing page** (GitHub Pages) once a device build runs.
 
 ## Known scaffold limitations
-- Screens use placeholders where the GL viewport / AR surface will be.
+- The 3D viewport is live; the capture screen still shows a placeholder where the
+  native AR camera surface will mount.
 - Android `finish()` returns an empty mesh until the fuse+march step lands.
 - `.gltf` currently emits a self-contained GLB under the name; split gltf+bin later.
 - Heavy ops run on the UI isolate for now (fine for small meshes).

@@ -4,6 +4,7 @@ import '../export/export_service.dart';
 import '../export/exporters.dart';
 import '../mesh/optimize.dart';
 import '../model/scan.dart';
+import 'mesh_view.dart';
 import 'theme.dart';
 
 /// Post-capture: view the scan, read its measured dimensions, optimize it against
@@ -21,6 +22,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   late Scan _scan = widget.scan;
   final _export = ExportService();
   bool _busy = false;
+  ShadeMode _mode = ShadeMode.solid;
 
   @override
   Widget build(BuildContext context) {
@@ -39,19 +41,30 @@ class _ViewerScreenState extends State<ViewerScreen> {
       ),
       body: Column(
         children: [
-          // 3D viewport (placeholder box until mesh_view GL widget is wired)
+          // 3D viewport — interactive software-rendered mesh (orbit/pan/zoom),
+          // with a shade-mode selector overlaid top-right.
           Expanded(
-            child: Container(
-              margin: const EdgeInsets.all(Insets.m),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0A0C10),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: const Center(
-                child: Text('3D viewport',
-                    style: TextStyle(color: Colors.white24)),
-              ),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: Container(
+                    margin: const EdgeInsets.all(Insets.m),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: MeshView(scan: _scan, mode: _mode),
+                  ),
+                ),
+                Positioned(
+                  top: Insets.l,
+                  right: Insets.l,
+                  child: _ModeSelector(
+                    mode: _mode,
+                    onChanged: (m) => setState(() => _mode = m),
+                  ),
+                ),
+              ],
             ),
           ),
           // stats + honest quality label
@@ -164,9 +177,16 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   Future<void> _saveToPhotos() async {
-    // A real render snapshot comes from the GL viewport (RepaintBoundary →
-    // toImage). Wired once mesh_view lands; here we surface the intent.
-    _toast('Rendering snapshot… (viewport capture pending)');
+    setState(() => _busy = true);
+    try {
+      final png = await renderScanToPng(_scan);
+      await _export.saveRenderToPhotos(png);
+      _toast('Saved render to Photos');
+    } catch (e) {
+      _toast('Save failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   void _toast(String msg) {
@@ -196,6 +216,41 @@ class _Stat extends StatelessWidget {
           Text(value,
               style:
                   const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+}
+
+/// A compact vertical toggle for the four shade modes, floated over the viewport.
+class _ModeSelector extends StatelessWidget {
+  const _ModeSelector({required this.mode, required this.onChanged});
+  final ShadeMode mode;
+  final ValueChanged<ShadeMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white12),
+      ),
+      padding: const EdgeInsets.all(4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final m in ShadeMode.values)
+            Tooltip(
+              message: m.label,
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                iconSize: 20,
+                color: m == mode ? const Color(0xFF4CC2FF) : Colors.white54,
+                onPressed: () => onChanged(m),
+                icon: Icon(m.icon),
+              ),
+            ),
         ],
       ),
     );

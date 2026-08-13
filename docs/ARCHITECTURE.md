@@ -67,6 +67,26 @@ Pure Dart, pure functions. Order in `autoClean`:
 > Large meshes should run these in an isolate (`compute()`), tracked as a TODO in
 > the viewer. The ops themselves are isolate-safe (no Flutter deps).
 
+## 3D viewport (`lib/ui/mesh_view.dart` + `camera_math.dart`)
+
+A **software renderer** — deliberately no GL plugin / platform texture, so it runs
+identically on iOS, Android, and the simulator, and an off-screen render for
+"Save to Photos" is free (`ui.PictureRecorder → toImage`).
+
+- Projects verts through an orbit camera, **depth-sorts triangles** (painter's
+  algorithm), back-face culls in screen space, shades with a headlight lambert.
+- Modes: **solid · wireframe · points · confidence**. Above 60k triangles it
+  auto-drops to points so the UI stays smooth (the export is unaffected).
+- **Framing** fits the model's bounding sphere to the FOV (`CameraMath.fitDistance`
+  uses `radius / tan(fov/2)`), so any scan is framed regardless of size; `distance`
+  is a zoom factor around that fit.
+- Camera math is factored into `camera_math.dart` and unit-tested
+  (`test/camera_math_test.dart`) — the perspective matrix's w/z term placement is
+  load-bearing (swapping them blows the projection up ~16×), so it's pinned.
+
+`renderScanToPng(scan)` runs the same painter with a fixed 3/4 camera → PNG bytes
+for `ExportService.saveRenderToPhotos`.
+
 ## Export (`lib/export/`)
 
 - `exporters.dart` — OBJ (+ vertex colors), binary STL, binary PLY (mesh + cloud).
