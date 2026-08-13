@@ -1,0 +1,46 @@
+name: structura
+description: Scan real structures with your phone's depth sensor, view them in 3D, clean the data, and export to every tool you use.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management — lightweight, no codegen.
+  provider: ^6.1.2
+
+  # 3D viewer. flutter_scene / three_dart-style rendering via a GL surface.
+  # (We render the mesh ourselves with a custom GL widget; this pulls vector_math.)
+  vector_math: ^2.1.4
+
+  # System share sheet (share exported files to any app).
+  share_plus: ^10.0.0
+
+  # Save a render / USDZ to the photo library on both platforms.
+  # gal handles iOS Photos + Android MediaStore with the right permissions.
+  gal: ^2.3.0
+
+  # File-system paths for staging exports before sharing.
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # Archive (glTF+bin+textures → .glb is hand-packed; .zip for OBJ+MTL bundles).
+  archive: ^3.6.1
+
+  # Permissions (camera, and on Android the ARCore checks).
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/

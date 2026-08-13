@@ -1,0 +1,42 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock          # app (not a published package) — lock is regenerated
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/flutter_export_environment.sh
+ios/Runner.xcworkspace/xcuserdata/
+**/*.xcuserstate
+ios/Runner/GeneratedPluginRegistrant.*
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/release/
+android/key.properties
+*.keystore
+*.jks
+
+# macOS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Scan artifacts / large captures (never commit user data)
+*.usdz
+*.ply
+*.obj
+*.stl
+scans/
+captures/
+sample-scans/*.glb
