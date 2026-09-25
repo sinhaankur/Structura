@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../export/export_service.dart';
 import '../export/exporters.dart';
-import '../mesh/optimize.dart';
+import '../mesh/scan_processor.dart';
 import '../model/scan.dart';
 import 'mesh_view.dart';
 import 'theme.dart';
@@ -113,9 +113,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Future<void> _autoClean() async {
     setState(() => _busy = true);
-    // run on the mesh; for large meshes this should move to an isolate — tracked
-    // in docs (compute() wrapper) — kept inline here for the scaffold.
-    final cleaned = MeshOptimizer.autoClean(_scan.mesh, triangleBudget: 150000);
+    // Runs the same pipeline as the post-capture pass, on a background isolate
+    // (ScanProcessor.reclean → compute()), so a big mesh never janks the UI.
+    final cleaned =
+        await ScanProcessor.reclean(_scan.mesh, triangleBudget: 150000);
+    if (!mounted) return;
     setState(() {
       _scan.mesh = cleaned;
       _busy = false;

@@ -18,7 +18,8 @@ Dart so iOS and Android behave identically.
                  ┌───────────────▼──────────────────────────────┐
                  │  DART  (shared)                               │
                  │  MeshCodec.decode → MeshData / PointCloud     │
-                 │  MeshOptimizer   (weld/islands/decimate/norm) │
+                 │  ScanProcessor   (raw→clean, on an isolate)   │
+                 │    └ MeshOptimizer (weld/islands/decimate/norm)│
                  │  GL viewer       (orbit / shade)              │
                  │  Exporters       (OBJ/glTF/GLB/PLY/STL)       │
                  │  ExportService   (share sheet + save Photos)  │
@@ -54,18 +55,44 @@ u32`. flags bit0 = normals, bit1 = colors.
 **STC1 (cloud):** `magic u32 | pCount u32 | flags u32 | positions pCount·3 f32 |
 [colors pCount·4 u8] | [confidence pCount f32]`. flags bit0 = colors, bit1 = conf.
 
-## Optimization (`lib/mesh/optimize.dart`)
+## Processing (`lib/mesh/scan_processor.dart` + `optimize.dart`)
 
-Pure Dart, pure functions. Order in `autoClean`:
+**`ScanProcessor` is the stage that turns a RAW capture into a usable scan** — the
+piece that was missing when the app "took something but didn't know what to
+process." Capture used to hand the dense, noisy, seam-duplicated ARKit/ARCore mesh
+straight to the viewer. Now:
 
-1. **weld** — spatial-hash merge of near-duplicate verts (chunk seams). 1–2mm.
+- `capture_screen._finish()` calls **`ScanProcessor.process(rawScan)`** right after
+  the native fuse, before the viewer ever mounts.
+- The viewer's manual "Optimize" button calls **`ScanProcessor.reclean(mesh)`** —
+  the same code path, so behaviour can't drift between the two entry points.
+
+`ScanProcessor` **runs off the UI thread** via `compute()` (a background isolate),
+so a 500k-triangle scan never janks, and it **chooses parameters from the capture
+quality** (LiDAR welds tight + keeps detail; depth-from-motion welds loose + culls
+harder). It reports `ProcessStage` progress for the capture spinner. Covered by
+`test/scan_processor_test.dart` (welds seams, drops speckle, unit normals,
+in-range indices, budget, metadata preserved).
+
+`MeshOptimizer` (`optimize.dart`) holds the pure ops the processor runs, in order:
+
+1. **weld** — spatial-hash merge of near-duplicate verts (chunk seams). 1–4mm.
 2. **removeSmallIslands** — union-find; drop components under N triangles (noise).
 3. **decimate** — vertex-clustering to a triangle budget. Fast + robust on
    non-manifold scan meshes (QEM is a later hero-export option).
 4. **recomputeNormals** — area-weighted smooth normals.
 
-> Large meshes should run these in an isolate (`compute()`), tracked as a TODO in
-> the viewer. The ops themselves are isolate-safe (no Flutter deps).
+The ops are pure + isolate-safe (no Flutter deps); `ScanProcessor` is the only
+thing that should call them, and it does so on the isolate.
+
+### Vertex color + point cloud (native side)
+
+`finish()` in the iOS plugin now also gives the processor the data it's designed
+for: it **samples per-vertex colors** by projecting each mesh vertex into the
+captured camera image (`ColorSampler`, BT.601 YCbCr→RGB), and **fuses a colored,
+confidence-weighted point cloud** from `sceneDepth` (unproject depth pixels →
+world). So STM1 now carries colors (flags bit1) and STC1 is populated — the
+confidence heatmap view and point-cloud export finally have real data.
 
 ## 3D viewport (`lib/ui/mesh_view.dart` + `camera_math.dart`)
 

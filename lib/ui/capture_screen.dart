@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../capture/capture_channel.dart';
+import '../mesh/scan_processor.dart';
 import '../model/scan.dart';
 import 'theme.dart';
 import 'viewer_screen.dart';
@@ -26,6 +27,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
   int _vertexCount = 0;
   bool _scanning = false;
   bool _finishing = false;
+  ProcessStage? _processStage;
 
   @override
   void initState() {
@@ -48,11 +50,34 @@ class _CaptureScreenState extends State<CaptureScreen> {
   Future<void> _finish() async {
     setState(() => _finishing = true);
     await _sub?.cancel();
-    final scan = await _channel.finish();
-    if (!mounted) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => ViewerScreen(scan: scan)),
-    );
+    try {
+      // 1. Native fuses + returns the RAW scan.
+      final raw = await _channel.finish();
+      // 2. Process it — the step that was missing. Raw depth fusion is dense and
+      //    noisy; ScanProcessor welds, de-speckles, decimates, and rebuilds
+      //    normals on a background isolate before the viewer sees it. Quality-tuned.
+      final scan = await ScanProcessor.process(
+        raw,
+        onStage: (stage) {
+          if (mounted) setState(() => _processStage = stage);
+        },
+      );
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => ViewerScreen(scan: scan)),
+      );
+    } catch (e) {
+      // Never wedge the capture screen on a fuse/process failure — surface it and
+      // let the user retry or cancel.
+      if (!mounted) return;
+      setState(() {
+        _finishing = false;
+        _processStage = null;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not finish the scan: $e')),
+      );
+    }
   }
 
   Future<void> _cancel() async {
@@ -102,7 +127,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
               child: Padding(
                 padding: const EdgeInsets.only(bottom: Insets.l),
                 child: _finishing
-                    ? const _FinishingIndicator()
+                    ? _FinishingIndicator(stage: _processStage)
                     : _CaptureButton(
                         scanning: _scanning,
                         onFinish: _finish,
@@ -186,15 +211,21 @@ class _CaptureButton extends StatelessWidget {
 }
 
 class _FinishingIndicator extends StatelessWidget {
-  const _FinishingIndicator();
+  const _FinishingIndicator({this.stage});
+
+  /// The current processing stage, once native has handed back the raw scan.
+  /// Null while the native fuse is still running (before processing starts).
+  final ProcessStage? stage;
+
   @override
   Widget build(BuildContext context) {
-    return const Column(
+    final label = stage?.label ?? 'Reconstructing mesh…';
+    return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        CircularProgressIndicator(),
-        SizedBox(height: Insets.s),
-        Text('Reconstructing mesh…', style: TextStyle(color: Colors.white70)),
+        const CircularProgressIndicator(),
+        const SizedBox(height: Insets.s),
+        Text(label, style: const TextStyle(color: Colors.white70)),
       ],
     );
   }
