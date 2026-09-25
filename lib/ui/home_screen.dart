@@ -79,6 +79,18 @@ class _HomeScreenState extends State<HomeScreen> {
                     s?.reason ?? 'This device can’t do depth capture.',
                     style: const TextStyle(color: Colors.white54, fontSize: 13),
                   ),
+                  const SizedBox(height: Insets.s),
+                  // With no depth sensor (simulator / non-Pro / desktop), you can
+                  // still run the FULL pipeline on a realistic simulated scan —
+                  // honestly labelled, so the app is demonstrable everywhere.
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _startSimulatedCapture,
+                      icon: const Icon(Icons.view_in_ar_outlined),
+                      label: const Text('Try a simulated scan'),
+                    ),
+                  ),
                 ],
                 const SizedBox(height: Insets.m),
               ],
@@ -90,6 +102,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _startCapture() {
+    CaptureChannel.instance.simulate = false;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const CaptureScreen()),
+    );
+  }
+
+  void _startSimulatedCapture() {
+    CaptureChannel.instance.simulate = true;
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const CaptureScreen()),
     );

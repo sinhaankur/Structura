@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../model/scan.dart';
+import 'synthetic_scan.dart';
 
 /// The Dart side of the native capture bridge.
 ///
@@ -24,6 +25,14 @@ class CaptureChannel {
   static const EventChannel _events = EventChannel('structura/capture/events');
 
   Stream<CaptureEvent>? _stream;
+
+  /// Device-free test mode. When true, capture returns a SYNTHETIC raw scan
+  /// (`SyntheticScan`) instead of talking to the native plugin — so the whole
+  /// capture→process→view→export pipeline runs on a simulator / plain machine /
+  /// in `flutter test`, with no LiDAR device. Off by default (real capture).
+  /// The capture UI can flip this on when `querySupport()` reports no sensor, so
+  /// the app is demonstrable everywhere and honestly labelled "Simulated".
+  bool simulate = false;
 
   /// Whether this device can do depth capture at all, and at what quality.
   /// Called before showing the capture UI so we can guide the user honestly.
@@ -52,19 +61,28 @@ class CaptureChannel {
   }
 
   /// Start a live capture session. Native begins pushing [CaptureEvent]s on the
-  /// event stream (progress, incremental mesh chunks, coverage).
-  Future<void> start({double voxelSizeMeters = 0.03}) =>
-      _method.invokeMethod('start', {'voxelSize': voxelSizeMeters});
+  /// event stream (progress, incremental mesh chunks, coverage). In [simulate]
+  /// mode there's no native session — the synthetic coverage stream drives the UI.
+  Future<void> start({double voxelSizeMeters = 0.03}) {
+    if (simulate) return Future<void>.value();
+    return _method.invokeMethod('start', {'voxelSize': voxelSizeMeters});
+  }
 
   /// Pause without discarding accumulated geometry.
-  Future<void> pause() => _method.invokeMethod('pause');
+  Future<void> pause() =>
+      simulate ? Future<void>.value() : _method.invokeMethod('pause');
 
   /// Resume a paused session.
-  Future<void> resume() => _method.invokeMethod('resume');
+  Future<void> resume() =>
+      simulate ? Future<void>.value() : _method.invokeMethod('resume');
 
   /// Stop + finalize. Native fuses everything and returns the completed [Scan]
   /// (mesh + point cloud + quality). Also ends the event stream.
   Future<Scan> finish() async {
+    if (simulate) {
+      // A realistic noisy raw scan, so the rest of the pipeline runs for real.
+      return SyntheticScan.room();
+    }
     final Map<Object?, Object?> r =
         await _method.invokeMethod('finish') as Map<Object?, Object?>;
     final meshBlob = r['mesh'] as Uint8List?;
@@ -80,16 +98,34 @@ class CaptureChannel {
   }
 
   /// Discard the session entirely.
-  Future<void> cancel() => _method.invokeMethod('cancel');
+  Future<void> cancel() =>
+      simulate ? Future<void>.value() : _method.invokeMethod('cancel');
 
-  /// Live events during capture (coverage %, incremental mesh, frame count).
+  /// Live events during capture (coverage %, incremental mesh, frame count). In
+  /// [simulate] mode, a synthetic coverage ramp drives the progress ring so the
+  /// capture screen behaves exactly as it would with a real sensor.
   Stream<CaptureEvent> events() {
+    if (simulate) return _simulatedEvents();
     return _stream ??= _events
         .receiveBroadcastStream()
         .map((dynamic e) => CaptureEvent.fromMap(e as Map<Object?, Object?>))
         .handleError((Object err) {
       if (kDebugMode) debugPrint('capture event error: $err');
     });
+  }
+
+  /// A coverage ramp 0→1 over ~3.5s, ~6 updates/sec, mimicking a live scan.
+  Stream<CaptureEvent> _simulatedEvents() async* {
+    const steps = 20;
+    for (var i = 1; i <= steps; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 175));
+      final t = i / steps;
+      yield CaptureEvent(
+        coverage: t,
+        frameCount: i * 10,
+        vertexCount: (t * 12000).round(),
+      );
+    }
   }
 
   static CaptureQuality _qualityFromString(String? s) => switch (s) {
