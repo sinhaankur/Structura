@@ -23,11 +23,19 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
   private var meshAnchors: [UUID: ARMeshAnchor] = [:]
   private var frameCount = 0
 
-  /// The most recent frame, kept so finish() can (a) sample vertex colors by
-  /// projecting mesh verts into the camera image and (b) fuse a depth point
-  /// cloud. Held weakly-in-spirit: replaced every throttled frame, cleared on
-  /// finish/cancel so we never pin an ARFrame's buffers.
+  /// The most recent frame, kept so finish() can fuse a depth point cloud and, as
+  /// a fallback, sample colors. Cleared on finish/cancel so we never pin buffers.
   private var lastFrame: ARFrame?
+
+  /// A sparse ring of posed keyframes captured through the WHOLE scan, so vertex
+  /// coloring can draw on views of the whole space — not just wherever the camera
+  /// happened to point at finish(). Without this, only the last frame's field of
+  /// view got real color and the rest of the export came out grey (the exact
+  /// grey-scan problem we set out to fix). Bounded, sampled by travel distance.
+  private var keyframes: [ColorSampler] = []
+  private var lastKeyframePosition: SIMD3<Float>?
+  private let maxKeyframes = 24
+  private let keyframeSpacingMeters: Float = 0.35
 
   static func register(with registrar: FlutterPluginRegistrar) {
     let instance = StructuraCapturePlugin()
@@ -58,6 +66,7 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
       result(finish())
     case "cancel":
       session?.pause(); session = nil; meshAnchors.removeAll(); lastFrame = nil
+      keyframes.removeAll(); lastKeyframePosition = nil
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -78,9 +87,18 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
   }
 
   private func makeConfig() -> ARWorldTrackingConfiguration? {
-    guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) else { return nil }
     let cfg = ARWorldTrackingConfiguration()
-    cfg.sceneReconstruction = .mesh          // request the LiDAR mesh
+    // Prefer meshWithClassification — ARKit tags each face wall/floor/ceiling/
+    // table/window/door/seat for FREE. That's the "well-defined, labelled" scan
+    // (surfaced as named submeshes on export). Fall back to plain mesh if a device
+    // supports reconstruction but not classification.
+    if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
+      cfg.sceneReconstruction = .meshWithClassification
+    } else if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+      cfg.sceneReconstruction = .mesh
+    } else {
+      return nil
+    }
     cfg.environmentTexturing = .automatic
     if type(of: cfg).supportsFrameSemantics(.sceneDepth) {
       cfg.frameSemantics.insert(.sceneDepth) // per-pixel depth for the point cloud
@@ -96,24 +114,54 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
     self.session = session
     self.frameCount = 0
     self.meshAnchors.removeAll()
+    self.keyframes.removeAll()
+    self.lastKeyframePosition = nil
   }
 
   // MARK: - ARSessionDelegate
 
   func session(_ session: ARSession, didUpdate frame: ARFrame) {
     frameCount += 1
-    // throttle: emit an event ~6×/sec
+
+    // Keyframe ring: whenever the camera has travelled far enough since the last
+    // keyframe, snapshot a ColorSampler for this pose. Sampled by DISTANCE (not
+    // time) so a slow, thorough scan and a quick one both get even coverage. This
+    // is what lets finish() color the whole space, not just the final view.
+    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                              frame.camera.transform.columns.3.y,
+                              frame.camera.transform.columns.3.z)
+    if shouldCaptureKeyframe(at: camPos) {
+      captureKeyframe(frame: frame, at: camPos)
+    }
+
+    // throttle events ~6×/sec
     if frameCount % 10 != 0 { return }
     self.lastFrame = frame
     let verts = meshAnchors.values.reduce(0) { $0 + $1.geometry.vertices.count }
-    // A crude coverage proxy: unique mesh anchors seen, capped. Replace with a
-    // real scanned-area metric once the fuse step lands.
     let coverage = min(1.0, Double(meshAnchors.count) / 40.0)
     eventSink?([
       "coverage": coverage,
       "frameCount": frameCount,
       "vertexCount": verts,
+      "keyframes": keyframes.count,
     ])
+  }
+
+  /// True when the camera has moved at least `keyframeSpacingMeters` from the last
+  /// keyframe (or there is none yet).
+  private func shouldCaptureKeyframe(at pos: SIMD3<Float>) -> Bool {
+    guard let last = lastKeyframePosition else { return true }
+    return simd_distance(pos, last) >= keyframeSpacingMeters
+  }
+
+  /// Snapshot a posed color sampler for this frame, evicting the oldest when full
+  /// so memory stays bounded (a ColorSampler copies the small pose + intrinsics;
+  /// it does NOT retain the ARFrame's pixel buffers — it reads them now).
+  private func captureKeyframe(frame: ARFrame, at pos: SIMD3<Float>) {
+    let sampler = ColorSampler(frame: frame, retainPixels: true)
+    keyframes.append(sampler)
+    lastKeyframePosition = pos
+    if keyframes.count > maxKeyframes { keyframes.removeFirst() }
   }
 
   func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
@@ -131,10 +179,12 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
   // MARK: - Finalize → STM1 blob
 
   private func finish() -> [String: Any] {
-    // Sample the camera image once (if we have a frame) so mesh verts get real
-    // colors — giving the Dart processing pipeline the colored data it expects.
-    let sampler = lastFrame.flatMap { ColorSampler(frame: $0) }
-    let meshBlob = fuseMeshToBlob(colorSampler: sampler)
+    // Color mesh verts from the WHOLE keyframe ring (each vertex gets the best
+    // view that saw it), not just the last frame — so the entire space is colored,
+    // not only the final field of view. Falls back to lastFrame if no keyframes.
+    var samplers = keyframes
+    if samplers.isEmpty, let f = lastFrame { samplers = [ColorSampler(frame: f, retainPixels: true)] }
+    let meshBlob = fuseMeshToBlob(samplers: samplers)
     let cloudBlob = lastFrame.flatMap { fuseCloudToBlob(frame: $0) }
     session?.pause()
     let id = UUID().uuidString
@@ -148,19 +198,23 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
     if let cloudBlob { result["pointCloud"] = FlutterStandardTypedData(bytes: cloudBlob) }
     meshAnchors.removeAll()
     lastFrame = nil
+    keyframes.removeAll()
+    lastKeyframePosition = nil
     return result
   }
 
   /// Concatenate every ARMeshAnchor's geometry (transformed to world space) into
-  /// the STM1 layout the Dart MeshCodec decodes. Normals always included; per-vertex
-  /// colors are sampled from the camera image when a [ColorSampler] is available.
-  private func fuseMeshToBlob(colorSampler: ColorSampler?) -> Data {
+  /// the STM1 layout the Dart MeshCodec decodes. Normals always included. Each
+  /// vertex is colored by the BEST keyframe that saw it (in front, in-frame,
+  /// facing the camera, nearest) — so the whole space gets color, not just the
+  /// last view. A vertex no keyframe saw stays neutral grey (honest, not invented).
+  private func fuseMeshToBlob(samplers: [ColorSampler]) -> Data {
     var positions: [Float] = []
     var normals: [Float] = []
     var colors: [UInt8] = []
     var indices: [UInt32] = []
     var base: UInt32 = 0
-    let wantColor = colorSampler != nil
+    let wantColor = !samplers.isEmpty
 
     for anchor in meshAnchors.values {
       let geo = anchor.geometry
@@ -175,7 +229,6 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
       for i in 0..<vCount {
         let v = vPtr.advanced(by: i * vBuf.stride)
           .assumingMemoryBound(to: (Float, Float, Float).self).pointee
-        // local → world
         let world = transform * SIMD4<Float>(v.0, v.1, v.2, 1)
         positions.append(world.x); positions.append(world.y); positions.append(world.z)
 
@@ -185,11 +238,9 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
         normals.append(wn.x); normals.append(wn.y); normals.append(wn.z)
 
         if wantColor {
-          // Project the world vertex into the camera image and read its RGB.
-          // Verts behind the camera / off-frame get a neutral grey so the buffer
-          // stays complete (the processor averages colors on weld/decimate).
-          let rgb = colorSampler?.color(atWorld: SIMD3<Float>(world.x, world.y, world.z))
-            ?? (128, 128, 128)
+          let wp = SIMD3<Float>(world.x, world.y, world.z)
+          let wnorm = simd_normalize(SIMD3<Float>(wn.x, wn.y, wn.z))
+          let rgb = bestColor(atWorld: wp, normal: wnorm, samplers: samplers) ?? (180, 176, 170)
           colors.append(rgb.0); colors.append(rgb.1); colors.append(rgb.2); colors.append(255)
         }
       }
@@ -208,6 +259,26 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
 
     return encodeStm1(positions: positions, normals: normals,
                       colors: wantColor ? colors : nil, indices: indices)
+  }
+
+  /// Pick the color for a world vertex from the best keyframe that saw it. Scores
+  /// each candidate by proximity × facing (a camera looking at the vertex's front,
+  /// from close, wins). Mirrors the Dart VertexColorizer so native + fallback agree.
+  private func bestColor(atWorld p: SIMD3<Float>, normal n: SIMD3<Float>,
+                         samplers: [ColorSampler]) -> (UInt8, UInt8, UInt8)? {
+    var bestScore: Float = 0
+    var best: (UInt8, UInt8, UInt8)?
+    for s in samplers {
+      guard let rgb = s.color(atWorld: p) else { continue }
+      let toCam = s.cameraPositionWorld - p
+      let dist = simd_length(toCam)
+      if dist < 1e-4 { continue }
+      let facing = simd_dot(n, toCam / dist)
+      if facing <= 0.05 { continue } // camera sees the back
+      let score = facing / dist
+      if score > bestScore { bestScore = score; best = rgb }
+    }
+    return best
   }
 
   /// STM1 blob: magic, vCount, iCount, flags, positions, normals, [colors], indices.
@@ -317,53 +388,113 @@ final class StructuraCapturePlugin: NSObject, FlutterPlugin, ARSessionDelegate {
   }
 }
 
-/// Samples the frame's captured camera image (YCbCr) at a projected world point,
-/// returning an sRGB (r,g,b) triple. Used to color mesh verts + cloud points.
+/// Samples a captured camera frame (YCbCr) at a projected world point, returning
+/// an sRGB (r,g,b) triple. Used to color mesh verts + cloud points.
+///
+/// A ColorSampler can be a KEYFRAME kept for the whole scan: pass `retainPixels:
+/// true` and it DEEP-COPIES the Y + CbCr planes at init (into `Data`) plus the
+/// pose/intrinsics it needs, so it never touches the ARFrame again. This is
+/// essential — ARKit recycles a frame's pixel buffers, so holding an ARFrame
+/// across delegate callbacks would read freed memory / crash. The copy is small
+/// (~a few MB per keyframe, bounded by maxKeyframes).
 @available(iOS 13.4, *)
 final class ColorSampler {
-  private let frame: ARFrame
   private let width: Int
   private let height: Int
 
-  init(frame: ARFrame) {
-    self.frame = frame
-    self.width = CVPixelBufferGetWidth(frame.capturedImage)
-    self.height = CVPixelBufferGetHeight(frame.capturedImage)
+  // Pose + intrinsics captured at init (small, always copied).
+  let cameraPositionWorld: SIMD3<Float>
+  private let projectPoint: (SIMD3<Float>) -> CGPoint?
+
+  // Deep-copied image planes (only when retainPixels). If nil we read live from
+  // the retained frame (transient, single-frame use like the point cloud).
+  private let yPlane: Data?
+  private let cbcrPlane: Data?
+  private let yRowBytes: Int
+  private let cbcrRowBytes: Int
+  private let liveFrame: ARFrame?
+
+  init(frame: ARFrame, retainPixels: Bool = false) {
+    let img = frame.capturedImage
+    self.width = CVPixelBufferGetWidth(img)
+    self.height = CVPixelBufferGetHeight(img)
+    let cam = frame.camera
+    let res = cam.imageResolution
+    self.cameraPositionWorld = SIMD3<Float>(cam.transform.columns.3.x,
+                                            cam.transform.columns.3.y,
+                                            cam.transform.columns.3.z)
+    // Capture the projection as a closure over an immutable copy of camera state,
+    // so keyframes don't reference the ARFrame.
+    let camCopy = cam
+    self.projectPoint = { p in
+      let pt = camCopy.projectPoint(p, orientation: .portrait, viewportSize: res)
+      let u = Float(pt.x) / Float(res.width)
+      let v = Float(pt.y) / Float(res.height)
+      if u < 0 || u > 1 || v < 0 || v > 1 { return nil }
+      return CGPoint(x: CGFloat(u), y: CGFloat(v))
+    }
+
+    if retainPixels {
+      CVPixelBufferLockBaseAddress(img, .readOnly)
+      defer { CVPixelBufferUnlockBaseAddress(img, .readOnly) }
+      self.yRowBytes = CVPixelBufferGetBytesPerRowOfPlane(img, 0)
+      self.cbcrRowBytes = CVPixelBufferGetBytesPerRowOfPlane(img, 1)
+      let yH = CVPixelBufferGetHeightOfPlane(img, 0)
+      let cH = CVPixelBufferGetHeightOfPlane(img, 1)
+      if let yb = CVPixelBufferGetBaseAddressOfPlane(img, 0),
+         let cb = CVPixelBufferGetBaseAddressOfPlane(img, 1) {
+        self.yPlane = Data(bytes: yb, count: yRowBytes * yH)
+        self.cbcrPlane = Data(bytes: cb, count: cbcrRowBytes * cH)
+      } else {
+        self.yPlane = nil; self.cbcrPlane = nil
+      }
+      self.liveFrame = nil
+    } else {
+      self.yPlane = nil; self.cbcrPlane = nil
+      self.yRowBytes = 0; self.cbcrRowBytes = 0
+      self.liveFrame = frame
+    }
   }
 
   /// Project a world point into the image and read its color. Returns nil when the
   /// point falls behind the camera or outside the frame.
   func color(atWorld p: SIMD3<Float>) -> (UInt8, UInt8, UInt8)? {
-    let cam = frame.camera
-    // World → normalized image point (0..1), accounting for current orientation.
-    let pt = cam.projectPoint(
-      p, orientation: .portrait,
-      viewportSize: cam.imageResolution
-    )
-    let u = Float(pt.x) / Float(cam.imageResolution.width)
-    let v = Float(pt.y) / Float(cam.imageResolution.height)
-    if u < 0 || u > 1 || v < 0 || v > 1 { return nil }
-    return sampleYCbCr(u: u, v: v)
+    guard let uv = projectPoint(p) else { return nil }
+    return sampleYCbCr(u: Float(uv.x), v: Float(uv.y))
   }
 
-  /// Read the biplanar YCbCr420 captured image at (u,v) and convert to sRGB.
   private func sampleYCbCr(u: Float, v: Float) -> (UInt8, UInt8, UInt8)? {
-    let img = frame.capturedImage
-    CVPixelBufferLockBaseAddress(img, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(img, .readOnly) }
-    guard let yBase = CVPixelBufferGetBaseAddressOfPlane(img, 0),
-          let cBase = CVPixelBufferGetBaseAddressOfPlane(img, 1) else { return nil }
-    let yRow = CVPixelBufferGetBytesPerRowOfPlane(img, 0)
-    let cRow = CVPixelBufferGetBytesPerRowOfPlane(img, 1)
     let px = Int(u * Float(width - 1))
     let py = Int(v * Float(height - 1))
-    let yVal = Float(yBase.advanced(by: py * yRow + px)
-      .assumingMemoryBound(to: UInt8.self).pointee)
-    // Chroma plane is half-resolution (4:2:0), interleaved Cb,Cr.
-    let cbcr = cBase.advanced(by: (py / 2) * cRow + (px / 2) * 2)
-      .assumingMemoryBound(to: UInt8.self)
-    let cb = Float(cbcr[0]) - 128
-    let cr = Float(cbcr[1]) - 128
+    let yVal: Float
+    let cb: Float
+    let cr: Float
+
+    if let yData = yPlane, let cData = cbcrPlane {
+      // read from the deep copies
+      yVal = yData.withUnsafeBytes { raw -> Float in
+        Float(raw.load(fromByteOffset: py * yRowBytes + px, as: UInt8.self)) }
+      let (a, b) = cData.withUnsafeBytes { raw -> (Float, Float) in
+        let off = (py / 2) * cbcrRowBytes + (px / 2) * 2
+        return (Float(raw.load(fromByteOffset: off, as: UInt8.self)),
+                Float(raw.load(fromByteOffset: off + 1, as: UInt8.self)))
+      }
+      cb = a - 128; cr = b - 128
+    } else if let frame = liveFrame {
+      let img = frame.capturedImage
+      CVPixelBufferLockBaseAddress(img, .readOnly)
+      defer { CVPixelBufferUnlockBaseAddress(img, .readOnly) }
+      guard let yBase = CVPixelBufferGetBaseAddressOfPlane(img, 0),
+            let cBase = CVPixelBufferGetBaseAddressOfPlane(img, 1) else { return nil }
+      let yRow = CVPixelBufferGetBytesPerRowOfPlane(img, 0)
+      let cRow = CVPixelBufferGetBytesPerRowOfPlane(img, 1)
+      yVal = Float(yBase.advanced(by: py * yRow + px).assumingMemoryBound(to: UInt8.self).pointee)
+      let cbcr = cBase.advanced(by: (py / 2) * cRow + (px / 2) * 2).assumingMemoryBound(to: UInt8.self)
+      cb = Float(cbcr[0]) - 128; cr = Float(cbcr[1]) - 128
+    } else {
+      return nil
+    }
+
     // BT.601 full-range YCbCr → RGB.
     let r = yVal + 1.402 * cr
     let g = yVal - 0.344136 * cb - 0.714136 * cr

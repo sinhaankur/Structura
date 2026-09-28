@@ -158,6 +158,7 @@ class CaptureEvent {
     required this.coverage,
     required this.frameCount,
     required this.vertexCount,
+    this.keyframes = 0,
     this.incrementalMesh,
   });
 
@@ -165,6 +166,11 @@ class CaptureEvent {
   final double coverage;
   final int frameCount;
   final int vertexCount;
+
+  /// How many posed color keyframes have been captured so far. More keyframes →
+  /// more of the final mesh gets real color (vs. neutral grey). Surfaced so the
+  /// capture UI can nudge the user to cover the space ("keep moving to colour it").
+  final int keyframes;
 
   /// Optional incremental mesh preview (decimated) for the live overlay.
   final MeshData? incrementalMesh;
@@ -175,6 +181,7 @@ class CaptureEvent {
       coverage: (m['coverage'] as num?)?.toDouble() ?? 0,
       frameCount: (m['frameCount'] as num?)?.toInt() ?? 0,
       vertexCount: (m['vertexCount'] as num?)?.toInt() ?? 0,
+      keyframes: (m['keyframes'] as num?)?.toInt() ?? 0,
       incrementalMesh: blob != null ? MeshCodec.decodeMesh(blob) : null,
     );
   }
