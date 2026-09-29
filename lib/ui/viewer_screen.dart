@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../ar/ar_service.dart';
 import '../export/export_service.dart';
 import '../export/exporters.dart';
 import '../mesh/dedrift.dart';
@@ -22,6 +23,7 @@ class ViewerScreen extends StatefulWidget {
 class _ViewerScreenState extends State<ViewerScreen> {
   late Scan _scan = widget.scan;
   final _export = ExportService();
+  final _ar = ArService();
   bool _busy = false;
   ShadeMode _mode = ShadeMode.solid;
 
@@ -116,6 +118,19 @@ class _ViewerScreenState extends State<ViewerScreen> {
               ),
             ),
           if (_drift.doubled) const SizedBox(height: Insets.m),
+          // View in AR — place/walk the scan at real scale (iOS AR Quick Look).
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Insets.m),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _busy ? null : _viewInAR,
+                icon: const Icon(Icons.view_in_ar),
+                label: const Text('View in AR — real scale'),
+              ),
+            ),
+          ),
+          const SizedBox(height: Insets.m),
           // optimize controls
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: Insets.m),
@@ -173,6 +188,23 @@ class _ViewerScreenState extends State<ViewerScreen> {
       _busy = false;
     });
     _toast('Merged duplicates: ${_fmt(before)} → ${_fmt(merged.vertexCount)} vertices');
+  }
+
+  /// Place/walk the scan at real scale via AR Quick Look. Honest failure messages
+  /// (no AR support, USDZ export failed) rather than a silent no-op.
+  Future<void> _viewInAR() async {
+    setState(() => _busy = true);
+    try {
+      if (!await _ar.isSupported()) {
+        _toast('AR isn’t available on this device');
+        return;
+      }
+      await _ar.viewInAR(_scan);
+    } on ArException catch (e) {
+      _toast(e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   void _showExportSheet() {

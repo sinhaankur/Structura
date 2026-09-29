@@ -21,13 +21,19 @@ import UIKit
     // Register any auto-discovered Flutter plugins (share_plus, gal, etc.).
     GeneratedPluginRegistrant.register(with: self)
 
-    // Register OUR capture plugin against the root Flutter engine's messenger.
+    // Register OUR native plugins against the root Flutter engine's messenger.
     if let controller = window?.rootViewController as? FlutterViewController {
       if #available(iOS 13.4, *) {
         StructuraCapturePlugin.register(
           with: registrar(forPlugin: "StructuraCapturePlugin")!
         )
         _ = controller // silence unused when the plugin registers via registrar
+      }
+      // AR Quick Look bridge — view a scan at real scale (iOS 12+).
+      if #available(iOS 12.0, *) {
+        StructuraArPlugin.register(
+          with: registrar(forPlugin: "StructuraArPlugin")!
+        )
       }
     }
 
