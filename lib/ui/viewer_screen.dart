@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../export/export_service.dart';
 import '../export/exporters.dart';
+import '../mesh/dedrift.dart';
 import '../mesh/scan_processor.dart';
 import '../model/scan.dart';
 import 'mesh_view.dart';
@@ -23,6 +24,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
   final _export = ExportService();
   bool _busy = false;
   ShadeMode _mode = ShadeMode.solid;
+
+  /// De-drift analysis of the current mesh — non-null when duplication is worth
+  /// offering to fix (the "two toilets" case). Recomputed after any mesh change.
+  late DriftReport _drift = DeDrift.analyze(_scan.mesh);
 
   @override
   Widget build(BuildContext context) {
@@ -82,6 +87,35 @@ class _ViewerScreenState extends State<ViewerScreen> {
             ),
           ),
           const SizedBox(height: Insets.m),
+          // De-drift banner — only when the scan looks duplicated (the "two
+          // toilets" case). Honest: says what it found and what a fix would do.
+          if (_drift.doubled)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: Insets.m),
+              child: Container(
+                padding: const EdgeInsets.all(Insets.s),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.orangeAccent.withOpacity(0.4)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.content_copy, size: 18, color: Colors.orangeAccent),
+                    const SizedBox(width: Insets.s),
+                    Expanded(
+                      child: Text(_drift.summary,
+                          style: const TextStyle(fontSize: 12, height: 1.3)),
+                    ),
+                    const SizedBox(width: Insets.s),
+                    TextButton(
+                      onPressed: _busy ? null : _fixDoubling,
+                      child: const Text('Merge'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (_drift.doubled) const SizedBox(height: Insets.m),
           // optimize controls
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: Insets.m),
@@ -120,9 +154,25 @@ class _ViewerScreenState extends State<ViewerScreen> {
     if (!mounted) return;
     setState(() {
       _scan.mesh = cleaned;
+      _drift = DeDrift.analyze(cleaned);
       _busy = false;
     });
     _toast('Optimized to ${_fmt(cleaned.triangleCount)} triangles');
+  }
+
+  /// Merge drift-doubled geometry (the "two toilets" fix). Fuses the overlapping
+  /// copies into one surface, then re-analyzes so the banner clears when resolved.
+  Future<void> _fixDoubling() async {
+    setState(() => _busy = true);
+    final before = _scan.mesh.vertexCount;
+    final merged = DeDrift.merge(_scan.mesh);
+    if (!mounted) return;
+    setState(() {
+      _scan.mesh = merged;
+      _drift = DeDrift.analyze(merged);
+      _busy = false;
+    });
+    _toast('Merged duplicates: ${_fmt(before)} → ${_fmt(merged.vertexCount)} vertices');
   }
 
   void _showExportSheet() {
